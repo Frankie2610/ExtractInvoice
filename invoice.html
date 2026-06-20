@@ -1,0 +1,795 @@
+<!DOCTYPE html>
+<html lang="vi">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Watch Extractor</title>
+
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script src="https://unpkg.com/mammoth/mammoth.browser.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@4/dist/tesseract.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
+
+    <!-- <script>
+        pdfjsLib.GlobalWorkerOptions.workerSrc =
+            "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js";
+    </script> -->
+    <style>
+        body {
+            font-family: Arial;
+            background: #f3f6fb;
+            padding: 40px;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: auto;
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.1);
+        }
+
+        h1 {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+
+        /* 🔥 Upload UI */
+        .file-upload {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .file-upload input {
+            display: none;
+        }
+
+        .upload-btn {
+            background: #1976d2;
+            color: white;
+            padding: 10px 18px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: 0.3s;
+        }
+
+        .upload-btn:hover {
+            background: #0d47a1;
+        }
+
+        .file-name {
+            font-size: 14px;
+            color: #555;
+        }
+
+        /* button xử lý */
+        button {
+            background: #2e7d32;
+            color: white;
+            border: none;
+            padding: 12px 20px;
+            border-radius: 6px;
+            cursor: pointer;
+            margin-top: 20px;
+            transition: 0.3s;
+        }
+
+        button:hover {
+            background: #1b5e20;
+        }
+
+        .progress {
+            height: 18px;
+            background: #eee;
+            border-radius: 10px;
+            overflow: hidden;
+            margin-top: 20px;
+        }
+
+        .bar {
+            height: 100%;
+            width: 0%;
+            background: #2e7d32;
+        }
+
+        .log {
+            margin-top: 20px;
+            font-size: 13px;
+            max-height: 200px;
+            overflow: auto;
+            background: #f9f9f9;
+            padding: 10px;
+            border-radius: 6px;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="container">
+
+        <h1>Watch Extractor From Invoice</h1>
+
+        <div class="file-upload">
+            <label class="upload-btn">
+                Chọn file
+                <input type="file" id="fileInput" onchange="showFileName()">
+            </label>
+            <span class="file-name" id="fileName">Chưa chọn file</span>
+        </div>
+
+        <button onclick="processFile()">Xử lý file</button>
+
+        <div class="progress">
+            <div class="bar" id="bar"></div>
+        </div>
+
+        <div class="log" id="log"></div>
+
+    </div>
+
+    <script>
+
+        function showFileName() {
+            const file = document.getElementById("fileInput").files[0]
+            document.getElementById("fileName").innerText = file ? file.name : "Chưa chọn file"
+        }
+
+        function log(t) {
+            document.getElementById("log").innerHTML += t + "<br>"
+        }
+
+        function updateProgress(p) {
+            document.getElementById("bar").style.width = p + "%"
+        }
+
+        function capitalize(str) {
+            return str.charAt(0).toUpperCase() + str.slice(1)
+        }
+
+        /* COLOR MAP */
+        const colorMap = {
+            BLK: "đen", BLU: "xanh", WHT: "trắng", GLD: "vàng", SLV: "bạc",
+            RG: "vàng hồng", PNK: "hồng", RED: "đỏ", GRN: "xanh lá", BRN: "nâu",
+            YLW: "vàng", ORG: "cam", PUR: "tím", GUN: "xám", GRY: "xám",
+            TEAL: "xanh ngọc", NAVY: "xanh navy", BURG: "đỏ rượu", CHAMP: "champagne", LAV: "tím nhạt"
+        }
+
+        function parseSKU(text) {
+            const regex = /\b(?=(?:[A-Z0-9]*[A-Z]){3,})(?=(?:[A-Z0-9]*\d){4,})[A-Z0-9]{7,}\b/g
+
+            const matches = text.match(regex)
+            if (!matches) return []
+
+            return [...new Set(matches)]
+        }
+
+
+        function splitProducts(text) {
+
+            const blocks = {}
+
+            const regex = /(\d+\)\s+[A-Z0-9]+[\s\S]*?)(?=\d+\)\s+[A-Z0-9]+|ORDER LIST|$)/g
+
+            let match
+
+            while ((match = regex.exec(text)) !== null) {
+
+                const block = match[1]
+
+                const skuMatch = block.match(
+                    /^\d+\)\s+([A-Z0-9]+)/m
+                )
+
+                if (skuMatch) {
+                    blocks[skuMatch[1]] = block
+                }
+            }
+
+            return blocks
+        }
+
+        function detectGender(block) {
+
+            if (/Size:\s*Lady/i.test(block))
+                return "Nữ"
+
+            if (/Size:\s*Gent/i.test(block))
+                return "Nam"
+
+            return ""
+        }
+
+        function water(g) {
+            return g == "Nam" ? "5ATM" : "3ATM"
+        }
+
+        /* FIX DIAL */
+        function detectDialColor(block) {
+
+            const m = block.match(
+                /Dial:\s*(.+?)(?=Battery:|Jewels:|Stp Mat:|Size:)/is
+            );
+
+            if (!m) return "";
+
+            const t = m[1].toLowerCase();
+
+            if (t.includes("rose gold")) return "rose_gold";
+
+            if (t.includes("black")) return "black";
+            if (t.includes("white")) return "white";
+            if (t.includes("silver")) return "silver";
+            if (t.includes("gold")) return "gold";
+            if (t.includes("blue")) return "blue";
+            if (t.includes("green")) return "green";
+            if (t.includes("red")) return "red";
+            if (t.includes("brown")) return "brown";
+            if (t.includes("pink")) return "pink";
+            if (t.includes("purple")) return "purple";
+            if (t.includes("grey") || t.includes("gray")) return "grey";
+
+            return "";
+        }
+        /* FIX STRAP */
+        function buildStrap(block) {
+
+            const m = block.match(
+                /Stp Mat:\s*(.+?)(?=Size:|Case:)/is
+            )
+
+            return m ? m[1].trim() : ""
+        }
+
+        /* FIX BEZEL */
+        function detectBezelColor(block) {
+            let tokens = block.toUpperCase().split(/[\s\/,]+/)
+            tokens = tokens.filter(t => t !== "P")
+
+            for (let i = 0; i < tokens.length; i++) {
+                if (tokens[i] == "CS") {
+                    for (let j = i - 1; j >= 0 && j >= i - 3; j--) {
+                        let t = tokens[j]
+                        if (colorMap[t]) return capitalize(colorMap[t])
+                    }
+                }
+            }
+            return "Bạc"
+        }
+
+        /* FIX GIÁ */
+
+        function extractQtyPrice(block) {
+
+            const m = block.match(
+                /(\d+,\d+)\s*\/\s*(\d+,\d+)\s+(\d+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)/i
+            );
+
+            if (!m) {
+                return {
+                    qty: "",
+                    price: ""
+                };
+            }
+
+            return {
+                qty: m[3],
+                price: m[4]
+            };
+        }
+
+        function extractProductName(block) {
+
+            let line = block.split("\n")[0] || "";
+
+            line = line.replace(/^\d+\)\s+[A-Z0-9]+\s+/, "");
+            line = line.replace(/^WATCH\s+/i, "");
+            line = line.replace(/^WATCH\s+/i, "");
+
+            const m = line.match(/(.*?)(?=\s+\d+(?:\.\d+)?\s*MM)/i);
+
+            return m ? m[1].trim() : line.trim();
+        }
+
+        function detectStrapMaterial(text) {
+
+            const t = text.toLowerCase();
+
+            if (t.includes("leather")) return "leather";
+
+            if (
+                t.includes("stainless steel") ||
+                t.includes("steel") ||
+                t.includes("mesh") ||
+                t.includes("bracelet") ||
+                t.includes("metal")
+            ) {
+                return "metal";
+            }
+
+            if (t.includes("silicone")) return "silicone";
+            if (t.includes("rubber")) return "rubber";
+            if (t.includes("nylon")) return "nylon";
+
+            // mặc định
+            return "metal";
+        }
+
+        function diameter(block) {
+
+            // Dạng: MM 35
+            let m = block.match(
+                /\bMM\s*(\d{2,3}(?:\.\d+)?)/i
+            );
+
+            if (m) {
+                return m[1] + " mm";
+            }
+
+            // Dạng: 35 MM
+            m = block.match(
+                /\b(\d{2,3}(?:\.\d+)?)\s*MM\b/i
+            );
+
+            if (m) {
+                return m[1] + " mm";
+            }
+
+            return "";
+        }
+
+        function diameter(block) {
+
+            // Dạng: MM 35
+            let m = block.match(
+                /\bMM\s*(\d{2,3}(?:\.\d+)?)/i
+            );
+
+            if (m) {
+                return m[1] + " mm";
+            }
+
+            // Dạng: 35 MM
+            m = block.match(
+                /\b(\d{2,3}(?:\.\d+)?)\s*MM\b/i
+            );
+
+            if (m) {
+                return m[1] + " mm";
+            }
+
+            return "";
+        }
+
+        const STRAP_MATERIAL_VI = {
+            leather: "da",
+            metal: "kim loại",
+            silicone: "silicone",
+            rubber: "cao su",
+            nylon: "vải nylon",
+            ceramic: "gốm",
+            titanium: "titan",
+            stainless_steel: "thép không gỉ"
+        };
+
+        const COLOR_VI = {
+            black: "đen",
+            white: "trắng",
+            brown: "nâu",
+            gold: "vàng",
+            silver: "bạc",
+            rose_gold: "vàng hồng",
+            red: "đỏ",
+            blue: "xanh dương",
+            green: "xanh lá",
+            pink: "hồng",
+            purple: "tím",
+            grey: "xám"
+        };
+
+        function formatStrap(material, color) {
+
+            // mặc định kim loại
+            if (!material) {
+                material = "metal";
+            }
+
+            const m = STRAP_MATERIAL_VI[material] || material;
+
+            // chỉ có chất liệu
+            if (!color) {
+                return `Dây ${m}`;
+            }
+
+            const c = COLOR_VI[color] || color;
+
+            return `Dây ${m} màu ${c}`;
+        }
+
+        function formatDialColor(color) {
+            if (!color) return "Không có dữ liệu";
+            return COLOR_VI[color] || color;
+        }
+
+        function formatPrice(price) {
+
+            if (!price) return "";
+
+            return price;
+        }
+
+        function formatQuantity(qty) {
+            if (qty === null || qty === undefined || qty === "") {
+                return "0";
+            }
+
+            const num = Number(qty);
+            if (isNaN(num)) return "0";
+
+            return num.toString();
+        }
+
+        function detectCaseMaterial(text) {
+
+            const t = text.toLowerCase();
+
+            if (
+                t.includes("ss case") ||
+                t.includes("stainless steel") ||
+                t.includes("steel")
+            ) {
+                return "Thép không gỉ";
+            }
+
+            if (t.includes("ceramic"))
+                return "Gốm";
+
+            if (t.includes("titanium"))
+                return "Titan";
+
+            if (t.includes("aluminum") || t.includes("aluminium"))
+                return "Nhôm";
+
+            if (t.includes("plastic") || t.includes("resin"))
+                return "Nhựa";
+
+            return "Thép không gỉ";
+        }
+        function detectBrand(text) {
+
+            const brands = [
+                "VERSACE",
+                "FERRAGAMO",
+                "GUESS",
+                "GC",
+                "MASERATI",
+                "PHILIPP PLEIN",
+                "FURLA",
+                "TRUSSARDI",
+                "ROBERTO CAVALLI",
+                "JUST CAVALLI",
+                "TIMBERLAND",
+                "ARMANI EXCHANGE",
+                "MICHAEL KORS",
+                "DIESEL",
+                "FOSSIL",
+                "SKAGEN",
+                "POLICE",
+                "LOCMAN",
+                "TED BAKER",
+                "ADIDAS"
+            ];
+
+            const upper = text.toUpperCase();
+
+            for (const brand of brands) {
+                if (upper.includes(brand)) return brand;
+            }
+
+            return "";
+        }
+
+        function normalizeKey(str) {
+            if (!str) return "";
+            return String(str).trim().toLowerCase();
+        }
+
+        function detectStrapColor(text) {
+
+            const t = text.toLowerCase();
+
+            if (t.includes("rose")) return "rose_gold";
+
+            if (t.includes("black")) return "black";
+            if (t.includes("white")) return "white";
+            if (t.includes("brown")) return "brown";
+            if (t.includes("gold")) return "gold";
+            if (t.includes("silver")) return "silver";
+            if (t.includes("blue")) return "blue";
+            if (t.includes("red")) return "red";
+            if (t.includes("pink")) return "pink";
+            if (t.includes("green")) return "green";
+            if (t.includes("grey") || t.includes("gray")) return "grey";
+
+            return "";
+        }
+
+        async function readFile(file) {
+            const name = file.name.toLowerCase()
+
+            if (name.endsWith(".txt") || name.endsWith(".rtf")) {
+                return await file.text()
+            }
+
+            if (name.endsWith(".docx")) {
+                const buffer = await file.arrayBuffer()
+                const result = await mammoth.extractRawText({ arrayBuffer: buffer })
+                return result.value
+            }
+
+            if (name.endsWith(".pdf")) {
+                const buffer = await file.arrayBuffer()
+                const pdf = await pdfjsLib.getDocument({ data: buffer }).promise
+                let text = ""
+
+                for (let i = 1; i <= pdf.numPages; i++) {
+                    const page = await pdf.getPage(i)
+                    const content = await page.getTextContent()
+
+                    console.log("Page", i, "items:", content.items.length)
+
+                    // ✅ Nếu có text thật → dùng luôn
+                    if (content.items.length > 0) {
+
+                        text += content.items.map(s => s.str).join(" ")
+
+                    } else {
+
+                        // ❗ PDF scan → dùng OCR
+                        log("PDF dạng ảnh → đang OCR trang " + i)
+
+                        // render ra canvas
+                        const viewport = page.getViewport({ scale: 2 })
+                        const canvas = document.createElement("canvas")
+                        const ctx = canvas.getContext("2d")
+
+                        canvas.width = viewport.width
+                        canvas.height = viewport.height
+
+                        await page.render({
+                            canvasContext: ctx,
+                            viewport: viewport
+                        }).promise
+
+                        // OCR
+                        const result = await Tesseract.recognize(canvas, 'eng')
+
+                        text += result.data.text
+                    }
+                }
+
+                console.log("TEXT PREVIEW:", text.slice(0, 200))
+
+                return text
+            }
+
+
+            if (name.endsWith(".xlsx") || name.endsWith(".xls")) {
+                const buffer = await file.arrayBuffer()
+                const workbook = XLSX.read(buffer)
+                let text = ""
+                workbook.SheetNames.forEach(n => {
+                    const sheet = XLSX.utils.sheet_to_json(workbook.Sheets[n], { header: 1 })
+                    sheet.forEach(r => {
+                        text += r.join(" ") + " "
+                    })
+                })
+                return text
+            }
+
+            return ""
+        }
+
+
+        async function processFile() {
+
+            const file = document.getElementById("fileInput").files[0];
+            if (!file) {
+                alert("Upload file trước");
+                return;
+            }
+
+            log("Đang đọc file...");
+
+            const text = await readFile(file);
+            const blocks = splitProducts(text);
+            const skus = Object.keys(blocks);
+
+            log("Tìm thấy " + skus.length + " SKU");
+
+            const rows = [];
+
+            for (let i = 0; i < skus.length; i++) {
+
+                updateProgress((i / skus.length) * 100);
+
+                const sku = skus[i];
+                const block = blocks[sku];
+
+                const gender = detectGender(block);
+
+                const strapText = buildStrap(block);
+
+                const strapColor =
+                    detectStrapColor(strapText) ||
+                    detectStrapColor(block);
+
+                const strap = formatStrap(
+                    detectStrapMaterial(strapText),
+                    strapColor
+                );
+
+                const dial = formatDialColor(detectDialColor(block));
+                const bezelColor = formatDialColor(detectBezelColor(block));
+
+                const qp = extractQtyPrice(block);
+
+                const price = formatPrice(qp.price);
+                const qty = formatQuantity(qp.qty);
+
+                const caseMaterial = detectCaseMaterial(block) || "Thép không gỉ";
+
+                const description =
+                    `Mã SKU: ${sku}
+Giới tính: ${gender}
+Chất liệu vỏ máy: ${caseMaterial}
+Viền đồng hồ: ${bezelColor}
+Đường kính: ${diameter(block)}
+Màu mặt số: ${dial}
+Chất liệu kính: Mineral
+Chống nước: ${water(gender)}
+Máy: Quartz
+Dây đeo: ${strap}
+Xuất xứ thương hiệu: Mỹ`;
+
+                rows.push({
+                    "THƯƠNG HIỆU": detectBrand(block),
+                    "TÊN SẢN PHẨM": extractProductName(block),
+                    "MÃ SẢN PHẨM": sku,
+                    "HÌNH ẢNH": "",
+                    "GIỚI TÍNH": gender,
+
+                    "GIÁ BÁN LẺ": price,
+                    "SỐ LƯỢNG": qty,
+
+                    "DESCRIPTION": description
+                });
+            }
+
+            exportExcel(rows);
+        }
+        function exportExcel(data) {
+
+            const ws = XLSX.utils.json_to_sheet(data);
+
+            const range = XLSX.utils.decode_range(ws['!ref']);
+
+            // Style toàn bộ sheet
+            for (let R = range.s.r; R <= range.e.r; ++R) {
+
+                for (let C = range.s.c; C <= range.e.c; ++C) {
+
+                    const cellRef = XLSX.utils.encode_cell({
+                        r: R,
+                        c: C
+                    });
+
+                    if (!ws[cellRef]) continue;
+
+                    ws[cellRef].s = {
+                        font: {
+                            name: "Times New Roman",
+                            sz: 11
+                        },
+                        alignment: {
+                            vertical: "top"
+                        }
+                    };
+                }
+            }
+
+            // Header
+            const headers = Object.keys(data[0]);
+
+            headers.forEach((header, index) => {
+
+                const cellRef = XLSX.utils.encode_cell({
+                    r: 0,
+                    c: index
+                });
+
+                if (!ws[cellRef]) return;
+
+                ws[cellRef].s = {
+                    fill: {
+                        patternType: "solid",
+                        fgColor: {
+                            rgb: "70AD47"
+                        }
+                    },
+                    font: {
+                        name: "Times New Roman",
+                        sz: 11,
+                        bold: true,
+                        color: {
+                            rgb: "FFFFFF"
+                        }
+                    },
+                    alignment: {
+                        horizontal: "center",
+                        vertical: "center",
+                        wrapText: true
+                    }
+                };
+            });
+
+            // Wrap Text riêng cho cột DESCRIPTION
+            const descriptionCol = 7; // cột thứ 8
+
+            for (let row = 1; row <= range.e.r; row++) {
+
+                const cellRef = XLSX.utils.encode_cell({
+                    r: row,
+                    c: descriptionCol
+                });
+
+                if (!ws[cellRef]) continue;
+
+                ws[cellRef].s = {
+                    font: {
+                        name: "Times New Roman",
+                        sz: 11
+                    },
+                    alignment: {
+                        vertical: "top",
+                        wrapText: true
+                    }
+                };
+            }
+
+            // Width cột
+            ws["!cols"] = [
+                { wch: 12 }, // THƯƠNG HIỆU
+                { wch: 25 }, // TÊN SẢN PHẨM
+                { wch: 15 }, // MÃ SP
+                { wch: 5 }, // GIỚI TÍNH
+                { wch: 12 }, // GIÁ BÁN LẺ
+                { wch: 5 }, // SỐ LƯỢNG
+                { wch: 30 }, // HÌNH ẢNH
+                { wch: 30 }  // DESCRIPTION
+            ];
+
+            const wb = XLSX.utils.book_new();
+
+            XLSX.utils.book_append_sheet(
+                wb,
+                ws,
+                "Products"
+            );
+
+            XLSX.writeFile(
+                wb,
+                "partner_products.xlsx"
+            );
+
+            log("Xuất Excel thành công");
+        }
+    </script>
+
+</body>
+
+</html>
